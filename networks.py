@@ -155,41 +155,75 @@ class GatedConvNet(nn.Module):
 
     def forward(self, x):
         if self.RNN_Input:
-            x = x.permute(1, 2, 0)
+            x = x.permute(0, 2, 1)
+            # x = x.permute(1, 2, 0) # original
         z = torch.empty([x.shape[0], self.blocks[-1].in_channels, x.shape[2]])
         for n, block in enumerate(self.blocks[:-1]):
             x, zn = block(x)
             z[:, n*self.channels*self.layers:(n + 1) * self.channels*self.layers, :] = zn
         output = self.blocks[-1](z)
         if self.RNN_Input:
-            output = output.permute(2, 0, 1)
+            output = output.permute(0, 2, 1)
+            # output = output.permute(2, 0, 1) # original
         return output
 
     # train_epoch runs one epoch of training
-    def train_epoch(self, input_data, target_data, loss_fcn, optim, bs):
+    def train_loop(self, dataloader, loss_fcn, optim):
         # shuffle the segments at the start of the epoch
-        shuffle = torch.randperm(input_data.shape[1])
+        # shuffle = torch.randperm(input_data.shape[1])
 
         # Iterate over the batches
+        num_batches = len(dataloader) # get number of batches
         ep_loss = 0
-        for batch_i in range(math.ceil(shuffle.shape[0] / bs)):
+        for batch_idx, batch_data in enumerate(dataloader):
+            # get current input and output sequences
+            batch_in, batch_out, _ = batch_data
+            
             # Load batch of shuffled segments
             self.zero_grad()
-            input_batch = input_data[:, shuffle[batch_i * bs:(batch_i + 1) * bs], :]
-            target_batch = target_data[:, shuffle[batch_i * bs:(batch_i + 1) * bs], :]
+            # input_batch = input_data[:, shuffle[batch_i * bs:(batch_i + 1) * bs], :]
+            # target_batch = target_data[:, shuffle[batch_i * bs:(batch_i + 1) * bs], :]
 
             # Process batch
-            output = self(input_batch)
+            output = self(batch_in)
 
             # Calculate loss and update network parameters
-            loss = loss_fcn(output, target_batch)
+            loss = loss_fcn(output, batch_out)
             loss.backward()
             optim.step()
 
             # Add the average batch loss to the epoch loss and reset the hidden states to zeros
-            ep_loss += loss
+            ep_loss += loss.item()
 
-        return ep_loss / (batch_i + 1)
+        ep_loss = ep_loss / num_batches
+
+        print("\n Epoch done!")
+        print(f"Epoch loss: {ep_loss:>7f}")
+
+        return ep_loss
+
+    def validate_loop(self, dataloader, loss_function):
+        
+        num_batches = len(dataloader)
+        validation_loss = 0
+
+        with torch.no_grad():
+            for batch_data in dataloader:
+
+                # get current input and output sequences
+                batch_in, batch_out, _ = batch_data
+
+                # Compute prediction and loss
+                batch_out_pred = self(batch_in)
+                validation_loss += loss_function(batch_out_pred,
+                                                 batch_out).item()
+
+            # Test loss ~ Average of batch losses
+            validation_loss /= num_batches
+
+        print(f"Validation loss: {validation_loss:>7f} \n")
+
+        return validation_loss
 
     # only proc processes a the input data and calculates the loss, optionally grad can be tracked or not
     def process_data(self, input_data, target_data, loss_fcn, grad=False):
