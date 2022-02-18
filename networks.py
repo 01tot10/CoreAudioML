@@ -138,7 +138,7 @@ model
 
 
 class GatedConvNet(nn.Module):
-    def __init__(self, channels=8, blocks=2, layers=9, dilation_growth=2, kernel_size=3, RNN_Input=True):
+    def __init__(self, channels=8, blocks=2, layers=9, dilation_growth=2, kernel_size=3, input_size=1, RNN_Input=True):
         super(GatedConvNet, self).__init__()
         # Set number of layers  and hidden_size for network layer/s
         self.layers = layers
@@ -147,10 +147,11 @@ class GatedConvNet(nn.Module):
         self.channels = channels
         self.blocks = nn.ModuleList()
         self.save_state = True
+        self.input_size = input_size
         self.RNN_Input = RNN_Input
         for b in range(blocks):
             self.blocks.append(ResConvBlock1DCausalGated(1 if b == 0 else channels, channels, dilation_growth,
-                                                         kernel_size, layers))
+                                                         kernel_size, layers, input_size))
         self.blocks.append(nn.Conv1d(channels*layers*blocks, 1, 1, 1, 0))
 
     def forward(self, x):
@@ -158,8 +159,12 @@ class GatedConvNet(nn.Module):
             x = x.permute(0, 2, 1)
             # x = x.permute(1, 2, 0) # original
         z = torch.empty([x.shape[0], self.blocks[-1].in_channels, x.shape[2]])
+        
+        # separate audio and cv
+        cv = x[:,1:,:]
+        x = x[:,0:1,:]
         for n, block in enumerate(self.blocks[:-1]):
-            x, zn = block(x)
+            x, zn = block(x, cv)
             z[:, n*self.channels*self.layers:(n + 1) * self.channels*self.layers, :] = zn
         output = self.blocks[-1](z)
         if self.RNN_Input:
@@ -256,21 +261,22 @@ layers are applied, with the filter size 'kernel_size' and the dilation increasi
 
 
 class ResConvBlock1DCausalGated(nn.Module):
-    def __init__(self, chan_input, chan_output, dilation_growth, kernel_size, layers):
+    def __init__(self, chan_input, chan_output, dilation_growth, kernel_size, layers, input_size):
         super(ResConvBlock1DCausalGated, self).__init__()
         self.channels = chan_output
+        self.input_size = input_size
 
         dilations = [dilation_growth ** lay for lay in range(layers)]
         self.layers = nn.ModuleList()
 
         for dil in dilations:
-            self.layers.append(ResConvLayer1DCausalGated(chan_input, chan_output, dil, kernel_size))
+            self.layers.append(ResConvLayer1DCausalGated(chan_input, chan_output, dil, kernel_size, input_size))
             chan_input = chan_output
 
-    def forward(self, x):
+    def forward(self, x, cv):
         z = torch.empty([x.shape[0], len(self.layers)*self.channels, x.shape[2]])
         for n, layer in enumerate(self.layers):
-            x, zn = layer(x)
+            x, zn = layer(x, cv)
             z[:, n*self.channels:(n + 1) * self.channels, :] = zn
         return x, z
 
@@ -281,21 +287,35 @@ Gated convolutional layer, zero pads and then applies a causal convolution to th
 
 class ResConvLayer1DCausalGated(nn.Module):
 
-    def __init__(self, chan_input, chan_output, dilation, kernel_size):
+    def __init__(self, chan_input, chan_output, dilation, kernel_size, input_size=1):
         super(ResConvLayer1DCausalGated, self).__init__()
         self.channels = chan_output
+        self.input_size = input_size
 
         self.conv = nn.Conv1d(in_channels=chan_input, out_channels=chan_output * 2, kernel_size=kernel_size, stride=1,
                               padding=0, dilation=dilation)
+        if input_size > 1:
+            self.cond = nn.Conv1d(input_size-1, chan_output * 2, 1, 1, 0)
         self.mix = nn.Conv1d(in_channels=chan_output, out_channels=chan_output, kernel_size=1, stride=1, padding=0)
 
-    def forward(self, x):
+    def forward(self, x, cv):
         residual = x
+        # convolutions
         y = self.conv(x)
-        z = torch.tanh(y[:, 0:self.channels, :]) * torch.sigmoid(y[:, self.channels:, :])
+        if self.input_size > 1:
+            y_cv = self.cond(cv)
+        
+        # zero-padding
+        y = torch.cat((torch.zeros(residual.shape[0], self.channels*2, residual.shape[2]-y.shape[2]), y), dim=2)
+        
+        if self.input_size > 1:
+            z = torch.tanh(y[:, 0:self.channels, :] + y_cv[:, 0:self.channels, :]) * torch.sigmoid(y[:, self.channels:, :] + y_cv[:, self.channels:, :])
+        else:
+            z = torch.tanh(y[:, 0:self.channels, :]) * torch.sigmoid(y[:, self.channels:, :])
 
         # Zero pad on the left side, so that z is the same length as x
-        z = torch.cat((torch.zeros(residual.shape[0], self.channels, residual.shape[2]-z.shape[2]), z), dim=2)
+        # z = torch.cat((torch.zeros(residual.shape[0], self.channels, residual.shape[2]-z.shape[2]), z), dim=2)
+        
         x = self.mix(z) + residual
         return x, z
 
