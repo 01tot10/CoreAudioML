@@ -84,17 +84,21 @@ class PreEmph(nn.Module):
 
     def forward(self, output, target):
         # zero pad the input/target so the filtered signal is the same length
-        output = torch.cat((torch.zeros(self.zPad, output.shape[1], 1), output))
-        target = torch.cat((torch.zeros(self.zPad, target.shape[1], 1), target))
+        output = torch.cat((torch.zeros(output.shape[0], self.zPad, 1), output),dim=1) # modified shape to suit dataloader
+        target = torch.cat((torch.zeros(target.shape[0], self.zPad, 1), target),dim=1) # same here
+        
         # Apply pre-emph filter, permute because the dimension order is different for RNNs and Convs in pytorch...
-        output = self.conv_filter(output.permute(1, 2, 0))
-        target = self.conv_filter(target.permute(1, 2, 0))
+        output = self.conv_filter(output.permute(0, 2, 1)) # modified shape to suit dataloader
+        target = self.conv_filter(target.permute(0, 2, 1)) # same
 
         if self.low_pass:
             output = self.lp_filter(output)
             target = self.lp_filter(target)
+        
+        output = output.permute(0, 2, 1) # modified shape to suit dataloader
+        target = target.permute(0, 2, 1) # same
 
-        return output.permute(2, 0, 1), target.permute(2, 0, 1)
+        return output, target
 
 class LossWrapper(nn.Module):
     def __init__(self, losses, pre_filt=None):
